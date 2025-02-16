@@ -1,6 +1,6 @@
 # Local AI Chat
 
-Local AI Chat is a lightweight, offline AI chat application that allows users to run GGUF-based LLaMA models locally. It supports **GPU acceleration** for improved performance and provides a modern, dark-themed user interface. Users can **switch models dynamically while retaining chat history**.
+AIText-Model Interface is a lightweight, offline AI chat application that allows users to run GGUF-based LLaMA models locally. It supports **GPU acceleration** for improved performance and provides a modern, dark-themed user interface. Users can **switch models dynamically while retaining chat history**.
 
 ---
 
