@@ -41,15 +41,15 @@ If you prefer to install manually, follow these steps:
 
 Usage Instructions:
 
-    Choose Processing Mode
+Choose Processing Mode
         On launch, select whether to use CPU or GPU acceleration.
         If using a GPU, ensure you have CUDA installed.
 
-    Load an AI Model
+ Load an AI Model
         Select a GGUF model file when prompted.
         You can obtain GGUF models from sources like TheBloke's Hugging Face page.
 
-    Chat with AI
+ Chat with AI
         Enter your message in the chat box.
         Click Send to receive a response.
         To switch models, click Select Model File (you can keep or reset chat history).
@@ -58,27 +58,27 @@ Usage Instructions:
 Troubleshooting
 Application Fails to Launch
 
-    Ensure Python 3.12+ is installed.
+ Ensure Python 3.12+ is installed.
     Run:
 
-pip install -r requirements.txt
+	pip install -r requirements.txt
 
 If using a virtual environment, activate it first:
 
     venv\Scripts\activate   # Windows
     source venv/bin/activate  # Linux/Mac
 
-Model Fails to Load
+Model Fails to Load:
 
-    Make sure the selected model is a valid GGUF file.
-    Adjust n_ctx and n_batch values in ai_chat_ui.py if memory issues occur:
+-Make sure the selected model is a valid GGUF file.
+-Adjust n_ctx and n_batch values in ai_chat_ui.py if memory issues occur:
 
-n_ctx = 4096  # Increase or decrease based on available RAM
-n_batch = 2048  # Reduce if using CPU to avoid memory overload
+	n_ctx = 4096  # Increase or decrease based on available RAM
+	n_batch = 2048  # Reduce if using CPU to avoid memory overload
 
 For GPU users, set:
 
-n_gpu_layers = -1  # Enables full GPU offload
+	n_gpu_layers = -1  # Enables full GPU offload
 
 For CPU users, try reducing:
 
