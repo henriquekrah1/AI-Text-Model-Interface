@@ -1,0 +1,5 @@
+PyQt6
+PyQt6-sip
+PyQt6-tools
+llama-cpp-python
+tk

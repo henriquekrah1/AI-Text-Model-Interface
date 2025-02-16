@@ -1,0 +1,58 @@
+/* General App Styling */
+QWidget {
+    background-color: #121212;
+    color: #E0E0E0;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+}
+
+/* Labels */
+QLabel {
+    font-size: 16px;
+    font-weight: bold;
+    color: #ffffff;
+}
+
+/* Chat Display */
+QTextEdit {
+    background-color: #1E1E1E;
+    color: #FFFFFF;
+    border: 1px solid #333;
+    padding: 5px;
+}
+
+/* Input Box */
+QTextEdit:focus {
+    border: 1px solid #2979FF;
+}
+
+/* Buttons */
+QPushButton {
+    background-color: #1976D2;
+    color: white;
+    border-radius: 6px;
+    padding: 8px;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+QPushButton:hover {
+    background-color: #1565C0;
+}
+
+QPushButton:pressed {
+    background-color: #0D47A1;
+}
+
+/* Specific Styling for the Send Button */
+QPushButton#send_button {
+    background-color: #1A73E8;
+}
+
+QPushButton#send_button:hover {
+    background-color: #1565C0;
+}
+
+QPushButton#send_button:pressed {
+    background-color: #0D47A1;
+}
