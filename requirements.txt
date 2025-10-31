@@ -1,5 +1,5 @@
-PyQt6
-PyQt6-sip
-PyQt6-tools
+PyQt6==6.10.0
+PyQt6-Qt6==6.10.0
+PyQt6-sip==13.10.2
 llama-cpp-python
 tk
