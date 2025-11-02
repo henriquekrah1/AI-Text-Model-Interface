@@ -24,8 +24,10 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QMenu,
     QStyledItemDelegate,
-    QDialog
+    QDialog,
+    QInputDialog
 )
+
 from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QThread, pyqtSignal, QTimer, QPoint, QRect
 from PyQt6.QtGui import QPainter, QPen, QColor
 from llama_cpp import Llama
@@ -140,11 +142,13 @@ class ChatManager:
         data = {
             "id": chat_id,
             "title": "New chat",
+            "title_locked": False,
             "created_at": datetime.datetime.utcnow().isoformat(),
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT}
             ]
         }
+
         if save:
             self.save_chat(data)
         return data
@@ -166,6 +170,19 @@ class ChatManager:
         except Exception as e:
             print(f"Error deleting chat: {e}")
             return False
+        
+    def rename_chat(self, chat_id: str, new_title: str):
+        """Rename a chat (update its title and lock it so auto-title won't override)."""
+        try:
+            data = self.load_chat(chat_id)
+            data["title"] = new_title.strip() if new_title.strip() else "Untitled chat"
+            data["title_locked"] = True
+            self.save_chat(data)
+            return True
+        except Exception as e:
+            print(f"Error renaming chat: {e}")
+            return False
+
     
     def open_chat_location(self, chat_id: str):
         """Open file explorer to the chat's directory"""
@@ -853,10 +870,15 @@ class AIChatGUI(QWidget):
             
             menu = QMenu(self)
 
+            # Rename option
+            rename_action = menu.addAction("✏️ Rename Chat")
+            rename_action.triggered.connect(lambda: self.rename_chat_dialog(chat_id))
+
             # File location option
             file_location_action = menu.addAction("📁 File Location")
             file_location_action.triggered.connect(lambda: self.chat_manager.open_chat_location(chat_id))
-            
+
+
             # Delete option
             delete_action = menu.addAction("🗑️ Delete Chat")
             delete_action.triggered.connect(lambda: self.delete_chat_confirm(chat_id))
@@ -880,6 +902,7 @@ class AIChatGUI(QWidget):
             menu.exec(global_pos)
         except Exception as e:
             print(f"Error showing menu: {e}")
+
     
     def delete_chat_confirm(self, chat_id: str):
         """Show confirmation dialog before deleting chat"""
@@ -901,12 +924,42 @@ class AIChatGUI(QWidget):
                         self.chat_display.clear()
                     
                     self.refresh_chat_list()
-                    QMessageBox.information(self, "Success", "Chat deleted successfully.")
+                    #QMessageBox.information(self, "Success", "Chat deleted successfully.")
                 else:
                     QMessageBox.critical(self, "Error", "Failed to delete chat.")
         except Exception as e:
             print(f"Error in delete confirmation: {e}")
             QMessageBox.critical(self, "Error", f"An error occurred: {e}")
+
+    def rename_chat_dialog(self, chat_id: str):
+        """Ask user for a new name and rename the chat."""
+        # get current title to prefill
+        try:
+            chat_data = self.chat_manager.load_chat(chat_id)
+            current_title = chat_data.get("title", "Untitled chat")
+        except Exception:
+            current_title = "Untitled chat"
+
+        new_title, ok = QInputDialog.getText(self, "Rename Chat", "New chat name:", text=current_title)
+        if not ok:
+            return
+
+        new_title = new_title.strip()
+        if not new_title:
+            QMessageBox.warning(self, "Invalid name", "Chat name cannot be empty.")
+            return
+
+        success = self.chat_manager.rename_chat(chat_id, new_title)
+        if success:
+            # if we're on this chat, update in-memory copy too
+            if self.current_chat and self.current_chat.get("id") == chat_id:
+                self.current_chat["title"] = new_title
+                self.current_chat["title_locked"] = True
+
+            self.refresh_chat_list()
+        else:
+            QMessageBox.critical(self, "Error", "Failed to rename chat.")
+
 
     def show_typing_indicator(self):
         """Display animated typing indicator"""
@@ -1121,6 +1174,11 @@ class AIChatGUI(QWidget):
     def update_chat_title_from_first_message(self):
         if not self.current_chat:
             return
+
+        # if user manually renamed, do NOT auto-title
+        if self.current_chat.get("title_locked"):
+            return
+
         msgs = self.current_chat.get("messages", [])
         for m in msgs:
             if m["role"] == "user":
@@ -1128,9 +1186,11 @@ class AIChatGUI(QWidget):
                 if len(title) > 40:
                     title = title[:40] + "."
                 self.current_chat["title"] = title if title else "New chat"
+                # do NOT lock here, auto-titles can still change
                 self.chat_manager.save_chat(self.current_chat)
                 self.refresh_chat_list()
                 break
+
 
     def select_model_file(self):
         root = tk.Tk()
