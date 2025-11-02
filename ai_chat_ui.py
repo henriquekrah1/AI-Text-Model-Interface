@@ -287,75 +287,73 @@ class MemoryDetectionThread(QThread):
     no_memory = pyqtSignal()
     error = pyqtSignal(str)
     
-    def __init__(self, user_message: str):
+    def __init__(self, model, user_message: str, conversation_context: list):
         super().__init__()
+        self.model = model
         self.user_message = user_message
+        self.conversation_context = conversation_context
     
     def run(self):
         try:
-            # Simple heuristic-based memory detection
+            # Simple heuristic check first - does this message warrant memory extraction?
             lowered = self.user_message.lower()
-            memories_to_store = []
             
             # Explicit memory requests
             explicit_triggers = [
                 "remember that", "remember this", "save to memory",
-                "don't forget", "keep in mind", "note that", "add to memory"
+                "don't forget", "keep in mind", "note that", "add to memory",
+                "my name is", "i am", "i live in", "i like", "i love",
+                "i work", "i study", "my favorite", "i prefer"
             ]
             
-            for trigger in explicit_triggers:
-                if trigger in lowered:
-                    # Extract what comes after the trigger
-                    parts = self.user_message.lower().split(trigger, 1)
-                    if len(parts) > 1:
-                        after = parts[1].strip().rstrip('.')
-                        if after:
-                            memories_to_store.append(after.capitalize() + ".")
-                            break
+            should_extract = any(trigger in lowered for trigger in explicit_triggers)
             
-            # Detect name patterns
-            if "my name is" in lowered:
-                parts = self.user_message.split("my name is", 1)
-                if len(parts) > 1:
-                    name = parts[1].strip().strip(".,!?")
-                    if name:
-                        memories_to_store.append(f"User's name is {name}.")
+            if not should_extract:
+                self.no_memory.emit()
+                return
             
-            # Detect age patterns
-            if "i am" in lowered and "years old" in lowered:
-                # Extract age
-                words = self.user_message.lower().split()
-                try:
-                    for i, word in enumerate(words):
-                        if word == "am" and i + 1 < len(words):
-                            age_part = words[i+1]
-                            if age_part.isdigit():
-                                memories_to_store.append(f"User is {age_part} years old.")
-                                break
-                except:
-                    pass
+            # Use AI to extract and format the memory properly
+            memory_extraction_prompt = [
+                {
+                    "role": "system",
+                    "content": """You are a memory extraction assistant. Your job is to:
+1. Extract ONLY factual information about the user that should be remembered
+2. Convert first-person statements ("I am...", "My name is...") to third-person ("User is...", "User's name is...")
+3. Remove any conversational fluff, questions, or requests
+4. Output ONLY the clean, factual statement to remember
+5. If there's nothing worth remembering, output exactly: "NO_MEMORY"
+
+Examples:
+Input: "remember that I am an American citizen, but that I was originally born in Brazil. Can you remember that for me, please?"
+Output: User is an American citizen and was originally born in Brazil.
+
+Input: "my name is Henry and I'm 25 years old"
+Output: User's name is Henry and user is 25 years old.
+
+Input: "I love pizza!"
+Output: User loves pizza.
+
+Input: "what's the weather like?"
+Output: NO_MEMORY"""
+                },
+                {
+                    "role": "user",
+                    "content": f"Extract memory from: {self.user_message}"
+                }
+            ]
             
-            # Detect location patterns
-            if "i live in" in lowered:
-                parts = self.user_message.split("i live in", 1)
-                if len(parts) > 1:
-                    location = parts[1].strip().strip(".,!?")
-                    if location:
-                        memories_to_store.append(f"User lives in {location}.")
+            # Generate memory extraction
+            output = self.model.create_chat_completion(
+                memory_extraction_prompt,
+                max_tokens=150,
+                temperature=0.3  # Lower temperature for more consistent formatting
+            )
             
-            # Detect preferences
-            if "i like" in lowered or "i love" in lowered:
-                trigger = "i like" if "i like" in lowered else "i love"
-                parts = self.user_message.split(trigger, 1)
-                if len(parts) > 1:
-                    preference = parts[1].strip().strip(".,!?")
-                    if preference:
-                        verb = "likes" if trigger == "i like" else "loves"
-                        memories_to_store.append(f"User {verb} {preference}.")
+            extracted_memory = output["choices"][0]["message"]["content"].strip()
             
-            # If we found memories, emit the first one
-            if memories_to_store:
-                self.memory_found.emit(memories_to_store[0])
+            # Check if there's actually something to remember
+            if extracted_memory and extracted_memory != "NO_MEMORY" and len(extracted_memory) > 5:
+                self.memory_found.emit(extracted_memory)
             else:
                 self.no_memory.emit()
                 
@@ -642,6 +640,7 @@ class AIChatGUI(QWidget):
         self.memory_thread = None
         self.is_generating = False
         
+        
         self.typing_timer = QTimer()
         self.typing_timer.timeout.connect(self.update_typing_indicator)
         self.typing_dots = 0
@@ -854,6 +853,9 @@ class AIChatGUI(QWidget):
             messages = self.current_chat.get("messages", [])
             for msg in messages:
                 role = msg.get("role", "")
+                # Skip system messages in display
+                if role == "system":
+                    continue
                 content = msg.get("content", "")
                 created_at = msg.get("created_at")
                 html_block = self.format_message(role, content, created_at)
@@ -875,6 +877,9 @@ class AIChatGUI(QWidget):
             messages = self.current_chat.get("messages", [])
             for msg in messages:
                 role = msg.get("role", "")
+                # Skip system messages in display
+                if role == "system":
+                    continue
                 content = msg.get("content", "")
                 created_at = msg.get("created_at")
                 html_block = self.format_message(role, content, created_at)
@@ -1009,6 +1014,9 @@ class AIChatGUI(QWidget):
         messages = chat_data.get("messages", [])
         for msg in messages:
             role = msg.get("role", "")
+            # Skip system messages - they shouldn't be visible to user
+            if role == "system":
+                continue
             content = msg.get("content", "")
             created_at = msg.get("created_at")
             html_block = self.format_message(role, content, created_at)
@@ -1088,6 +1096,22 @@ class AIChatGUI(QWidget):
     def on_memory_detection_error(self, error_msg: str):
         """Called when memory detection encounters an error"""
         print(f"Memory detection error: {error_msg}")
+    
+    def start_ai_response(self):
+        """Start AI response generation after memory detection is complete"""
+        self.send_button.setText("Generating...")
+        
+        # Update system message with memories (including any just added)
+        messages_with_memory = self.current_chat["messages"].copy()
+        for msg in messages_with_memory:
+            if msg["role"] == "system":
+                msg["content"] = self.get_system_prompt_with_memories()
+                break
+
+        self.worker_thread = AIWorkerThread(self.model, messages_with_memory)
+        self.worker_thread.finished.connect(self.on_ai_response_finished)
+        self.worker_thread.error.connect(self.on_ai_response_error)
+        self.worker_thread.start()
 
     def on_ai_response_finished(self, response: str):
         """Called when AI generation completes successfully"""
@@ -1146,13 +1170,6 @@ class AIChatGUI(QWidget):
         user_msg = {"role": "user", "content": user_text, "created_at": now_iso}
         self.current_chat["messages"].append(user_msg)
 
-        # Start memory detection in background
-        self.memory_thread = MemoryDetectionThread(user_text)
-        self.memory_thread.memory_found.connect(self.on_memory_detection_finished)
-        self.memory_thread.no_memory.connect(self.on_memory_detection_none)
-        self.memory_thread.error.connect(self.on_memory_detection_error)
-        self.memory_thread.start()
-
         self.update_chat_title_from_first_message()
         self.chat_manager.save_chat(self.current_chat)
         self.refresh_chat_list()
@@ -1162,20 +1179,16 @@ class AIChatGUI(QWidget):
         self.show_typing_indicator()
         
         self.send_button.setEnabled(False)
-        self.send_button.setText("Generating...")
+        self.send_button.setText("Processing...")
         self.is_generating = True
 
-        # Update system message with memories
-        messages_with_memory = self.current_chat["messages"].copy()
-        for msg in messages_with_memory:
-            if msg["role"] == "system":
-                msg["content"] = self.get_system_prompt_with_memories()
-                break
-
-        self.worker_thread = AIWorkerThread(self.model, messages_with_memory)
-        self.worker_thread.finished.connect(self.on_ai_response_finished)
-        self.worker_thread.error.connect(self.on_ai_response_error)
-        self.worker_thread.start()
+        # First, run memory detection, then generate response
+        self.memory_thread = MemoryDetectionThread(self.model, user_text, self.current_chat["messages"])
+        self.memory_thread.memory_found.connect(self.on_memory_detection_finished)
+        self.memory_thread.no_memory.connect(self.on_memory_detection_none)
+        self.memory_thread.error.connect(self.on_memory_detection_error)
+        self.memory_thread.finished.connect(self.start_ai_response)  # Start AI after memory is done
+        self.memory_thread.start()
 
 
 class MainApp(QStackedWidget):
