@@ -83,9 +83,22 @@ class MemoryManager:
         self.memories = [m for m in self.memories if m["id"] != memory_id]
         self.save_memories()
     
+    def update_memory(self, memory_id: str, new_content: str):
+        """Update the content of an existing memory"""
+        changed = False
+        for mem in self.memories:
+            if mem["id"] == memory_id:
+                mem["content"] = new_content.strip()
+                changed = True
+                break
+        if changed:
+            self.save_memories()
+        return changed
+    
     def get_all_memories(self):
         """Get all memories"""
         return self.memories
+
     
     def get_memories_as_context(self):
         """Format memories for inclusion in system prompt"""
@@ -412,6 +425,37 @@ class MemoryListWidget(QListWidget):
         else:
             super().mousePressEvent(event)
 
+class MemoryEditDialog(QDialog):
+    def __init__(self, original_text: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Memory")
+        self.setMinimumWidth(450)
+
+        layout = QVBoxLayout()
+
+        label = QLabel("Edit the memory below:")
+        layout.addWidget(label)
+
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText(original_text)
+        self.text_edit.setMinimumHeight(120)
+        layout.addWidget(self.text_edit)
+
+        btn_row = QHBoxLayout()
+        done_btn = QPushButton("Done")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addStretch()
+        btn_row.addWidget(done_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        done_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+
+        self.setLayout(layout)
+
+    def get_text(self) -> str:
+        return self.text_edit.toPlainText().strip()
 
 class MemoryViewDialog(QDialog):
     """Dialog to view and manage memories"""
@@ -424,10 +468,29 @@ class MemoryViewDialog(QDialog):
         
         layout = QVBoxLayout()
         
-        # Title
+        # Title row (label + Add button)
+        title_row = QHBoxLayout()
         title = QLabel("Saved Memories")
         title.setStyleSheet("font-size: 18px; font-weight: bold; padding: 10px;")
-        layout.addWidget(title)
+        title_row.addWidget(title)
+
+        add_btn = QPushButton("Add")
+        add_btn.setFixedHeight(28)
+        add_btn.setStyleSheet("""
+            QPushButton {
+                padding: 3px 10px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.08);
+            }
+        """)
+        add_btn.clicked.connect(self.add_memory_manual)
+
+        title_row.addStretch()
+        title_row.addWidget(add_btn)
+
+        layout.addLayout(title_row)
+
         
         # Memory list
         self.memory_list = MemoryListWidget()
@@ -477,6 +540,16 @@ class MemoryViewDialog(QDialog):
                 item.setSizeHint(QSize(550, 60))
                 self.memory_list.addItem(item)
     
+    def add_memory_manual(self):
+        """Open empty editor to manually add a new memory"""
+        dlg = MemoryEditDialog("", self)
+        if dlg.exec():
+            text = dlg.get_text()
+            if text:
+                self.memory_manager.add_memory(text, source="user")
+                self.refresh_memories()
+
+    
     def show_memory_options(self, item: QListWidgetItem, global_pos: QPoint):
         """Show options menu for a memory item"""
         memory_id = item.data(Qt.ItemDataRole.UserRole)
@@ -484,9 +557,13 @@ class MemoryViewDialog(QDialog):
             return
         
         menu = QMenu(self)
+
+        edit_action = menu.addAction("✏️ Edit Memory")
+        edit_action.triggered.connect(lambda: self.edit_memory(item, memory_id))
         
         delete_action = menu.addAction("🗑️ Delete Memory")
         delete_action.triggered.connect(lambda: self.delete_memory(memory_id))
+
         
         menu.setStyleSheet("""
             QMenu {
@@ -504,6 +581,24 @@ class MemoryViewDialog(QDialog):
         """)
         
         menu.exec(global_pos)
+
+    def edit_memory(self, item: QListWidgetItem, memory_id: str):
+        """Open dialog to edit this memory"""
+        # Grab current text (first line is the content, second line is timestamp)
+        full_text = item.text()
+        # Our display format was: "<content>\n(<timestamp>)"
+        # so split on newline and take the first line
+        current_content = full_text.split("\n", 1)[0].strip()
+
+        dlg = MemoryEditDialog(current_content, self)
+        if dlg.exec():  # user clicked Done
+            new_text = dlg.get_text()
+            if new_text:
+                updated = self.memory_manager.update_memory(memory_id, new_text)
+                if updated:
+                    self.refresh_memories()
+        # if Cancel, do nothing
+
     
     def delete_memory(self, memory_id: str):
         """Delete a memory after confirmation"""
