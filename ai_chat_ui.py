@@ -23,20 +23,80 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QSplitter,
     QMenu,
-    QStyledItemDelegate
+    QStyledItemDelegate,
+    QDialog
 )
 from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QThread, pyqtSignal, QTimer, QPoint, QRect
-from PyQt6.QtGui import QCursor, QPainter, QPen, QColor
+from PyQt6.QtGui import QPainter, QPen, QColor
 from llama_cpp import Llama
 
 
 CHAT_DIR = "chats"
+MEMORY_FILE = "memories.json"
 SYSTEM_PROMPT = "You are a friendly, conversational AI. Keep responses casual and engaging."
 
 
 def load_stylesheet(qss_file):
     with open(qss_file, "r") as file:
         return file.read()
+
+
+class MemoryManager:
+    """Manages persistent memories across all chats"""
+    def __init__(self, memory_file=MEMORY_FILE):
+        self.memory_file = memory_file
+        self.memories = self.load_memories()
+    
+    def load_memories(self):
+        """Load memories from file"""
+        if os.path.exists(self.memory_file):
+            try:
+                with open(self.memory_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Error loading memories: {e}")
+                return []
+        return []
+    
+    def save_memories(self):
+        """Save memories to file"""
+        try:
+            with open(self.memory_file, "w", encoding="utf-8") as f:
+                json.dump(self.memories, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving memories: {e}")
+    
+    def add_memory(self, content: str, source: str = "user"):
+        """Add a new memory"""
+        memory = {
+            "id": str(uuid.uuid4()),
+            "content": content.strip(),
+            "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "source": source
+        }
+        self.memories.append(memory)
+        self.save_memories()
+        return memory
+    
+    def delete_memory(self, memory_id: str):
+        """Delete a memory by ID"""
+        self.memories = [m for m in self.memories if m["id"] != memory_id]
+        self.save_memories()
+    
+    def get_all_memories(self):
+        """Get all memories"""
+        return self.memories
+    
+    def get_memories_as_context(self):
+        """Format memories for inclusion in system prompt"""
+        if not self.memories:
+            return ""
+        
+        memory_text = "\n\n=== REMEMBERED INFORMATION ===\n"
+        for mem in self.memories:
+            memory_text += f"- {mem['content']}\n"
+        memory_text += "=== END OF MEMORIES ===\n"
+        return memory_text
 
 
 class ChatManager:
@@ -221,6 +281,294 @@ class AIWorkerThread(QThread):
             self.error.emit(str(e))
 
 
+class MemoryDetectionThread(QThread):
+    """Background thread for detecting if user message should be saved to memory"""
+    memory_found = pyqtSignal(str)  # Emits formatted memory content
+    no_memory = pyqtSignal()
+    error = pyqtSignal(str)
+    
+    def __init__(self, user_message: str):
+        super().__init__()
+        self.user_message = user_message
+    
+    def run(self):
+        try:
+            # Simple heuristic-based memory detection
+            lowered = self.user_message.lower()
+            memories_to_store = []
+            
+            # Explicit memory requests
+            explicit_triggers = [
+                "remember that", "remember this", "save to memory",
+                "don't forget", "keep in mind", "note that", "add to memory"
+            ]
+            
+            for trigger in explicit_triggers:
+                if trigger in lowered:
+                    # Extract what comes after the trigger
+                    parts = self.user_message.lower().split(trigger, 1)
+                    if len(parts) > 1:
+                        after = parts[1].strip().rstrip('.')
+                        if after:
+                            memories_to_store.append(after.capitalize() + ".")
+                            break
+            
+            # Detect name patterns
+            if "my name is" in lowered:
+                parts = self.user_message.split("my name is", 1)
+                if len(parts) > 1:
+                    name = parts[1].strip().strip(".,!?")
+                    if name:
+                        memories_to_store.append(f"User's name is {name}.")
+            
+            # Detect age patterns
+            if "i am" in lowered and "years old" in lowered:
+                # Extract age
+                words = self.user_message.lower().split()
+                try:
+                    for i, word in enumerate(words):
+                        if word == "am" and i + 1 < len(words):
+                            age_part = words[i+1]
+                            if age_part.isdigit():
+                                memories_to_store.append(f"User is {age_part} years old.")
+                                break
+                except:
+                    pass
+            
+            # Detect location patterns
+            if "i live in" in lowered:
+                parts = self.user_message.split("i live in", 1)
+                if len(parts) > 1:
+                    location = parts[1].strip().strip(".,!?")
+                    if location:
+                        memories_to_store.append(f"User lives in {location}.")
+            
+            # Detect preferences
+            if "i like" in lowered or "i love" in lowered:
+                trigger = "i like" if "i like" in lowered else "i love"
+                parts = self.user_message.split(trigger, 1)
+                if len(parts) > 1:
+                    preference = parts[1].strip().strip(".,!?")
+                    if preference:
+                        verb = "likes" if trigger == "i like" else "loves"
+                        memories_to_store.append(f"User {verb} {preference}.")
+            
+            # If we found memories, emit the first one
+            if memories_to_store:
+                self.memory_found.emit(memories_to_store[0])
+            else:
+                self.no_memory.emit()
+                
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MemoryListWidget(QListWidget):
+    """Custom list widget for memories with hover detection"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.parent_dialog = None
+        
+        # Set custom delegate
+        self.delegate = ChatItemDelegate(self)
+        self.setItemDelegate(self.delegate)
+        
+    def mouseMoveEvent(self, event):
+        item = self.itemAt(event.pos())
+        index = self.indexAt(event.pos())
+        
+        if item:
+            self.delegate.hovered_index = index
+            if self.is_over_dots(event.pos(), index):
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            self.delegate.hovered_index = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        
+        self.viewport().update()
+        super().mouseMoveEvent(event)
+    
+    def leaveEvent(self, event):
+        self.delegate.hovered_index = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.viewport().update()
+        super().leaveEvent(event)
+    
+    def is_over_dots(self, pos, index):
+        rect = self.visualRect(index)
+        dots_x = rect.right() - 50
+        dots_rect = QRect(dots_x, rect.top(), 50, rect.height())
+        return dots_rect.contains(pos)
+    
+    def mousePressEvent(self, event):
+        item = self.itemAt(event.pos())
+        index = self.indexAt(event.pos())
+        
+        if item and self.is_over_dots(event.pos(), index):
+            if self.parent_dialog:
+                self.parent_dialog.show_memory_options(item, event.globalPosition().toPoint())
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+
+class MemoryViewDialog(QDialog):
+    """Dialog to view and manage memories"""
+    def __init__(self, memory_manager: MemoryManager, parent=None):
+        super().__init__(parent)
+        self.memory_manager = memory_manager
+        
+        self.setWindowTitle("Memory Manager")
+        self.setGeometry(300, 300, 600, 500)
+        
+        layout = QVBoxLayout()
+        
+        # Title
+        title = QLabel("Saved Memories")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; padding: 10px;")
+        layout.addWidget(title)
+        
+        # Memory list
+        self.memory_list = MemoryListWidget()
+        self.memory_list.parent_dialog = self
+        self.memory_list.setStyleSheet("""
+            QListWidget::item {
+                padding: 10px;
+                border-radius: 4px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            }
+            QListWidget::item:hover {
+                background-color: rgba(255, 255, 255, 0.05);
+            }
+        """)
+        layout.addWidget(self.memory_list)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+        
+        self.setLayout(layout)
+        
+        self.refresh_memories()
+    
+    def refresh_memories(self):
+        """Refresh the memory list"""
+        self.memory_list.clear()
+        memories = self.memory_manager.get_all_memories()
+        
+        if not memories:
+            item = QListWidgetItem("No memories saved yet.")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.memory_list.addItem(item)
+        else:
+            for mem in memories:
+                # Format: content + timestamp
+                try:
+                    dt = datetime.datetime.fromisoformat(mem["created_at"].replace("Z", ""))
+                    timestamp = dt.strftime("%Y-%m-%d %H:%M")
+                except:
+                    timestamp = mem.get("created_at", "")
+                
+                display_text = f"{mem['content']}\n({timestamp})"
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.ItemDataRole.UserRole, mem["id"])
+                item.setSizeHint(QSize(550, 60))
+                self.memory_list.addItem(item)
+    
+    def show_memory_options(self, item: QListWidgetItem, global_pos: QPoint):
+        """Show options menu for a memory item"""
+        memory_id = item.data(Qt.ItemDataRole.UserRole)
+        if not memory_id:
+            return
+        
+        menu = QMenu(self)
+        
+        delete_action = menu.addAction("🗑️ Delete Memory")
+        delete_action.triggered.connect(lambda: self.delete_memory(memory_id))
+        
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2a2a2a;
+                border: 1px solid #444;
+                padding: 5px;
+            }
+            QMenu::item {
+                padding: 8px 25px;
+                background-color: transparent;
+            }
+            QMenu::item:selected {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+        """)
+        
+        menu.exec(global_pos)
+    
+    def delete_memory(self, memory_id: str):
+        """Delete a memory after confirmation"""
+        reply = QMessageBox.question(
+            self,
+            "Delete Memory",
+            "Are you sure you want to delete this memory?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.memory_manager.delete_memory(memory_id)
+            self.refresh_memories()
+
+
+class SettingsDialog(QDialog):
+    """Settings dialog with various options"""
+    def __init__(self, memory_manager: MemoryManager, parent=None):
+        super().__init__(parent)
+        self.memory_manager = memory_manager
+        
+        self.setWindowTitle("Settings")
+        self.setGeometry(300, 300, 400, 300)
+        
+        layout = QVBoxLayout()
+        
+        # Title
+        title = QLabel("Settings")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; padding: 10px;")
+        layout.addWidget(title)
+        
+        # Memory button
+        memory_btn = QPushButton("💾 Manage Memories")
+        memory_btn.clicked.connect(self.open_memory_manager)
+        memory_btn.setStyleSheet("""
+            QPushButton {
+                padding: 15px;
+                font-size: 14px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+        """)
+        layout.addWidget(memory_btn)
+        
+        # Spacer
+        layout.addStretch()
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+        
+        self.setLayout(layout)
+    
+    def open_memory_manager(self):
+        """Open the memory manager dialog"""
+        memory_dialog = MemoryViewDialog(self.memory_manager, self)
+        memory_dialog.exec()
+
+
 class GPUSelectionScreen(QWidget):
     def __init__(self, switch_to_chat):
         super().__init__()
@@ -287,14 +635,17 @@ class AIChatGUI(QWidget):
         self.setGeometry(200, 200, 1000, 650)
 
         self.chat_manager = ChatManager()
+        self.memory_manager = MemoryManager()
         self.current_chat = None
         
         self.worker_thread = None
+        self.memory_thread = None
         self.is_generating = False
         
         self.typing_timer = QTimer()
         self.typing_timer.timeout.connect(self.update_typing_indicator)
         self.typing_dots = 0
+        self.typing_indicator_visible = False
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
 
@@ -349,6 +700,12 @@ class AIChatGUI(QWidget):
         self.toggle_sidebar_btn.setFixedWidth(40)
         self.toggle_sidebar_btn.clicked.connect(self.toggle_sidebar)
         top_bar.addWidget(self.toggle_sidebar_btn)
+        
+        # Settings button (gear icon)
+        self.settings_btn = QPushButton("⚙")
+        self.settings_btn.setFixedWidth(40)
+        self.settings_btn.clicked.connect(self.open_settings)
+        top_bar.addWidget(self.settings_btn)
 
         self.model_label = QLabel("No model selected.", self)
         self.model_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -389,6 +746,11 @@ class AIChatGUI(QWidget):
         self.sidebar_widget.setMaximumWidth(self.sidebar_width_expanded)
 
         self.refresh_chat_list()
+    
+    def open_settings(self):
+        """Open settings dialog"""
+        settings_dialog = SettingsDialog(self.memory_manager, self)
+        settings_dialog.exec()
 
     def show_chat_options(self, item: QListWidgetItem, global_pos: QPoint):
         """Show options menu for a chat item"""
@@ -404,8 +766,6 @@ class AIChatGUI(QWidget):
             # Delete option
             delete_action = menu.addAction("🗑️ Delete Chat")
             delete_action.triggered.connect(lambda: self.delete_chat_confirm(chat_id))
-            
-            
             
             # Custom styling for menu
             menu.setStyleSheet("""
@@ -709,6 +1069,25 @@ class AIChatGUI(QWidget):
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load model:\n{e}")
+    
+    def get_system_prompt_with_memories(self):
+        """Generate system prompt with memory context"""
+        base_prompt = SYSTEM_PROMPT
+        memory_context = self.memory_manager.get_memories_as_context()
+        return base_prompt + memory_context
+
+    def on_memory_detection_finished(self, formatted_memory: str):
+        """Called when memory detection finds something to remember"""
+        self.memory_manager.add_memory(formatted_memory, source="auto")
+        print(f"Memory saved: {formatted_memory}")
+    
+    def on_memory_detection_none(self):
+        """Called when no memory needs to be saved"""
+        pass  # Do nothing
+    
+    def on_memory_detection_error(self, error_msg: str):
+        """Called when memory detection encounters an error"""
+        print(f"Memory detection error: {error_msg}")
 
     def on_ai_response_finished(self, response: str):
         """Called when AI generation completes successfully"""
@@ -767,6 +1146,13 @@ class AIChatGUI(QWidget):
         user_msg = {"role": "user", "content": user_text, "created_at": now_iso}
         self.current_chat["messages"].append(user_msg)
 
+        # Start memory detection in background
+        self.memory_thread = MemoryDetectionThread(user_text)
+        self.memory_thread.memory_found.connect(self.on_memory_detection_finished)
+        self.memory_thread.no_memory.connect(self.on_memory_detection_none)
+        self.memory_thread.error.connect(self.on_memory_detection_error)
+        self.memory_thread.start()
+
         self.update_chat_title_from_first_message()
         self.chat_manager.save_chat(self.current_chat)
         self.refresh_chat_list()
@@ -779,7 +1165,14 @@ class AIChatGUI(QWidget):
         self.send_button.setText("Generating...")
         self.is_generating = True
 
-        self.worker_thread = AIWorkerThread(self.model, self.current_chat["messages"])
+        # Update system message with memories
+        messages_with_memory = self.current_chat["messages"].copy()
+        for msg in messages_with_memory:
+            if msg["role"] == "system":
+                msg["content"] = self.get_system_prompt_with_memories()
+                break
+
+        self.worker_thread = AIWorkerThread(self.model, messages_with_memory)
         self.worker_thread.finished.connect(self.on_ai_response_finished)
         self.worker_thread.error.connect(self.on_ai_response_error)
         self.worker_thread.start()
@@ -801,6 +1194,7 @@ class MainApp(QStackedWidget):
         self.chat_screen = AIChatGUI(use_gpu)
         self.addWidget(self.chat_screen)
         self.setCurrentWidget(self.chat_screen)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
